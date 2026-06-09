@@ -300,7 +300,8 @@ def cmd_list(args: argparse.Namespace):
 
 def cmd_dial(args: argparse.Namespace):
     """Adjust character parameters — the vibe-coding interface."""
-    char_file = CHARACTER_DIR / f"{args.name}.json"
+    char_file = _resolve_char_file(args.name)
+
     if not char_file.exists():
         print(f"Character '{args.name}' not found. Create it first.")
         return
@@ -319,9 +320,21 @@ def cmd_dial(args: argparse.Namespace):
     _print_summary(params)
 
 
+def _resolve_char_file(name: str) -> Path:
+    """Resolve a character file by name (case-insensitive)."""
+    name_lower = name.lower().replace(' ', '_')
+    char_file = CHARACTER_DIR / f"{name_lower}.json"
+    if char_file.exists():
+        return char_file
+    for f in CHARACTER_DIR.glob("*.json"):
+        if f.stem.lower() == name_lower:
+            return f
+    return char_file  # return the expected path even if missing (caller handles)
+
+
 def cmd_render(args: argparse.Namespace):
     """Render content through a character's voice."""
-    char_file = CHARACTER_DIR / f"{args.name}.json"
+    char_file = _resolve_char_file(args.name)
     if not char_file.exists():
         print(f"Character '{args.name}' not found.")
         return
@@ -354,8 +367,10 @@ def cmd_decompose(args: argparse.Namespace):
     pipeline = DecompositionPipeline()
     persona = asyncio.run(pipeline.decompose(args.audio, speaker=args.speaker))
 
+    default_path = None
     if args.output:
         pipeline.store(persona, store_path=args.output)
+        default_path = args.output
     else:
         default_path = pipeline.store(persona)
 

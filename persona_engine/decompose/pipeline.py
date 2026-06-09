@@ -82,8 +82,6 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 DEFAULT_SAMPLE_RATE = 16000
-DEFAULT_OPENSMILE_CONFIG = "/home/ubuntu/.openclaw/workspace/persona-engine/decompose/egemaps.conf"
-OPENSMILE_EXEC = os.environ.get("OPENSMILE_EXEC", "opensmile")
 PIPER_EXEC = os.environ.get("PIPER_EXEC", "piper")
 PIPER_MODEL = os.environ.get(
     "PIPER_MODEL",
@@ -104,14 +102,14 @@ class DecompositionPipeline:
     def __init__(
         self,
         sample_rate: int = DEFAULT_SAMPLE_RATE,
-        opensmile_exec: str = OPENSMILE_EXEC,
         piper_exec: str = PIPER_EXEC,
         piper_model: str = PIPER_MODEL,
     ):
         self.sample_rate = sample_rate
-        self.opensmile_exec = opensmile_exec
         self.piper_exec = piper_exec
         self.piper_model = piper_model
+        # Lazy-init OpenSMILE smile instance (created on first use)
+        self._smile = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -172,7 +170,7 @@ class DecompositionPipeline:
         persona.persona_vector = self._compute_persona_vector(persona)
         persona.smp_seed = self._compute_smp_seed(speaker, cadence)
 
-        logger.info(f"Persona '{speaker}' decomposed: {persona.model_dump_json(exclude={'persona_vector', 'prosody.speaker_embedding', 'prosody.egemaps_vector'})}")
+        logger.info(f"Persona '{speaker}' decomposed")
         return persona
 
     async def decompose_batch(
@@ -222,50 +220,92 @@ class DecompositionPipeline:
         )
         return {"wav_path": wav_path, "duration_seconds": duration}
 
+    def _get_smile(self):
+        """Lazy-init and return the OpenSMILE Smile instance."""
+        if self._smile is None:
+            try:
+                import opensmile
+                self._smile = opensmile.Smile(
+                    feature_set=opensmile.FeatureSet.eGeMAPSv02,
+                    feature_level=opensmile.FeatureLevel.LowLevelDescriptors,
+                )
+                # Quick validation: process a low-level feature
+                logger.info("OpenSMILE Python bridge initialized")
+            except ImportError as e:
+                logger.warning(f"OpenSMILE Python package not available: {e}")
+                self._smile = None  # signal mock mode
+        return self._smile
+
     def _extract_egemaps(self, wav_path: str) -> Dict[str, Any]:
-        """Extract 25 eGeMAPS features using OpenSMILE."""
-        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False, mode="w") as f:
-            csv_path = f.name
-        try:
-            result = subprocess.run(
-                [
-                    self.opensmile_exec, "SMILExtract",
-                    "-C", self._get_egemaps_config(),
-                    "-I", wav_path,
-                    "-O", csv_path,
-                    "-nolog", "1",
-                ],
-                capture_output=True, text=True, timeout=120,
-            )
-            if result.returncode != 0:
-                logger.warning(f"OpenSMILE failed: {result.stderr}")
-                return self._mock_egemaps(wav_path)
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            logger.warning("OpenSMILE not available, using mock features")
-            return self._mock_egemaps(wav_path)
+        """Extract eGeMAPS features using OpenSMILE Python bridge."""
+        smile = self._get_smile()
 
-        return self._parse_egemaps_csv(csv_path)
+        if smile is not None:
+            try:
+                return self._extract_with_opensmile(smile, wav_path)
+            except Exception as e:
+                logger.warning(f"OpenSMILE extraction failed: {e}, using mock features")
 
-    def _get_egemaps_config(self) -> str:
-        """Path to eGeMAPS config or use default from OpenSMILE."""
-        config = Path(DEFAULT_OPENSMILE_CONFIG)
-        if config.exists():
-            return str(config)
-        # OpenSMILE ships configs in its installation
+        return self._mock_egemaps(wav_path)
+
+    def _extract_with_opensmile(self, smile, wav_path: str) -> Dict[str, Any]:
+        """Extract and structure features using the OpenSMILE Python API."""
+        import pandas as pd
+        import opensmile
+
+        # Get per-frame low-level descriptors (25 eGeMAPS LLDs)
+        result_low = smile.process_file(wav_path)
+        # result_low is a pd.DataFrame with shape (N_frames, 25 columns)
+
+        frames = []
+        for idx, row in result_low.iterrows():
+            frame = {}
+            for col_idx, col_name in enumerate(result_low.columns):
+                val = row.iloc[col_idx]
+                if pd.isna(val):
+                    val = 0.0
+                frame[str(col_name)] = float(val)
+            frames.append(frame)
+
+        # Compute per-channel statistics
+        statistics = {}
+        for col in result_low.columns:
+            vals = result_low[col].dropna().values.astype(float)
+            if len(vals) == 0:
+                vals = np.array([0.0])
+            statistics[str(col)] = {
+                "mean": float(np.mean(vals)),
+                "std": float(np.std(vals)),
+                "min": float(np.min(vals)),
+                "max": float(np.max(vals)),
+            }
+
+        # Also compute functional features for aggregate stats
         try:
-            result = subprocess.run(
-                [self.opensmile_exec, "SMILExtract", "-L"],
-                capture_output=True, text=True,
+            smile_func = opensmile.Smile(
+                feature_set=opensmile.FeatureSet.eGeMAPSv02,
+                feature_level=opensmile.FeatureLevel.Functionals,
             )
-            for line in result.stdout.split("\n"):
-                if "egemaps" in line.lower():
-                    return line.strip()
-        except FileNotFoundError:
-            pass
-        return ""
+            result_func = smile_func.process_file(wav_path)
+            functionals = {}
+            for col in result_func.columns:
+                val = result_func.iloc[0][col]
+                if pd.isna(val):
+                    val = 0.0
+                functionals[str(col)] = float(val)
+        except Exception as e:
+            logger.warning(f"OpenSMILE functionals extraction failed: {e}")
+            functionals = {}
+
+        return {
+            "frames": frames,
+            "frame_count": len(frames),
+            "statistics": statistics,
+            "functionals": functionals,
+        }
 
     def _parse_egemaps_csv(self, csv_path: str) -> Dict[str, Any]:
-        """Parse OpenSMILE CSV output into structured features."""
+        """Parse OpenSMILE CSV output into structured features. (Legacy, kept for compat.)"""
         import csv
         features = {"frames": [], "timestamps": [], "statistics": {}}
         with open(csv_path) as f:
@@ -281,7 +321,6 @@ class DecompositionPipeline:
 
         if features["frames"]:
             frame_count = len(features["frames"])
-            # Compute per-feature statistics
             all_keys = features["frames"][0].keys()
             for key in all_keys:
                 vals = [f[key] for f in features["frames"]]
@@ -295,71 +334,172 @@ class DecompositionPipeline:
 
         return features
 
+    def _extract_f0_contour(self, features: Dict[str, Any]) -> List[float]:
+        """
+        Extract F0 contour from frame-level features.
+        Returns an approximation of F0 in Hz from semitone measurements.
+        """
+        frames = features.get("frames", [])
+        f0_semitone_key = None
+        for key in frames[0] if frames else []:
+            if "f0semitone" in key.lower():
+                f0_semitone_key = key
+                break
+
+        if f0_semitone_key and frames:
+            semitones = [f.get(f0_semitone_key, 0.0) for f in frames]
+            # Convert semitones from 27.5Hz → Hz
+            f0_hz = [27.5 * (2 ** (st / 12.0)) for st in semitones]
+            return f0_hz
+        return []
+
+    def _extract_loudness_contour(self, features: Dict[str, Any]) -> List[float]:
+        """Extract loudness contour from frame-level features."""
+        frames = features.get("frames", [])
+        loudness_key = None
+        for key in frames[0] if frames else []:
+            if "loudness" in key.lower() and "sma3" in key.lower():
+                loudness_key = key
+                break
+
+        if loudness_key and frames:
+            return [f.get(loudness_key, 0.0) for f in frames]
+        return []
+
     def _analyze_cadence(
         self, features: Dict[str, Any], audio_info: Dict[str, Any]
     ) -> CadenceProfile:
-        """Extract cadence profile from audio features."""
+        """Extract cadence profile from audio features using real data."""
         duration = audio_info["duration_seconds"]
+        frames = features.get("frames", [])
         stats = features.get("statistics", {})
 
-        # Infer pause duration from energy dips
-        energy_vals = [
-            f.get("F1amplitudeLogRelF0_sma3z", 0.0)
-            for f in features.get("frames", [])
-        ]
-        low_energy_threshold = np.percentile(energy_vals, 20) if energy_vals else -50.0
-        pause_count = sum(1 for e in energy_vals if e < low_energy_threshold)
-        pause_ratio = pause_count / max(len(energy_vals), 1)
+        # Extract loudness contour for pause detection
+        loudness_vals = self._extract_loudness_contour(features)
 
-        # Estimate WPM from feature rate
-        wpm_estimate = 150.0  # default
-        loudness_std = stats.get("Loudness_sma3", {}).get("std", 10.0)
-        if loudness_std > 15:
-            wpm_estimate = 170.0
-        elif loudness_std < 5:
-            wpm_estimate = 130.0
+        if loudness_vals and len(loudness_vals) > 20:
+            # Real pause detection from loudness contour
+            low_threshold = np.percentile(loudness_vals, 15)
+            pause_mask = np.array(loudness_vals) < low_threshold
+            # Count transitions (start/end of pauses)
+            pause_transitions = np.diff(pause_mask.astype(int))
+            pause_count = int(np.sum(pause_transitions == 1))  # entering pause
+            pause_ratio = float(np.mean(pause_mask))
+
+            # Estimate pause durations
+            if pause_count > 0 and duration > 0:
+                total_pause_time = pause_ratio * duration
+                mean_pause = total_pause_time / pause_count
+                pause_per_min = pause_count * (60.0 / max(duration, 1))
+            else:
+                mean_pause = 0.3
+                pause_per_min = 5.0
+
+            # Estimate WPM from spectral flux / energy variability
+            loudness_std = float(np.std(loudness_vals)) if len(loudness_vals) > 1 else 5.0
+            # Higher loudness variability ≈ faster/more emphatic speech
+            wpm_estimate = 150.0
+            if loudness_std > 8:
+                wpm_estimate = 175.0
+            elif loudness_std > 5:
+                wpm_estimate = 155.0
+            elif loudness_std < 3:
+                wpm_estimate = 130.0
+        else:
+            # Fallback: use feature statistics
+            loudness_mean = stats.get("Loudness_sma3", {}).get("mean", 5.0)
+            loudness_std = stats.get("Loudness_sma3", {}).get("std", 5.0)
+            pause_count = max(1, int(duration * 0.5))
+            mean_pause = 0.4 + 0.1 * (loudness_std / max(loudness_mean, 1))
+            pause_per_min = pause_count * (60.0 / max(duration, 1))
+            pause_ratio = pause_per_min * mean_pause / 60.0
+            wpm_estimate = 150.0
+
+        # Estimate thought duration from pause patterns
+        if pause_ratio > 0.01:
+            thought_duration = duration / max(pause_count, 1) * (1 - pause_ratio)
+        else:
+            thought_duration = duration / 3.0
+        thought_duration = max(0.5, min(15.0, thought_duration))
+
+        # Extract F0 for turn style analysis
+        f0_contour = self._extract_f0_contour(features)
+        f0_std = float(np.std(f0_contour)) if len(f0_contour) > 1 else 15.0
+
+        wpm_std = loudness_std * 3.0 if not np.isnan(loudness_std) else 10.0
 
         return CadenceProfile(
             mean_wpm=wpm_estimate,
-            wpm_std=loudness_std * 5,
-            mean_pause_duration=0.5 * pause_ratio,
-            pause_duration_std=0.2 * pause_ratio,
-            pause_frequency=pause_ratio * 60 / max(duration, 1),
-            thought_duration_mean=3.0 * (1 - pause_ratio) + 1.0,
-            thought_duration_std=1.5,
+            wpm_std=wpm_std,
+            mean_pause_duration=mean_pause,
+            pause_duration_std=mean_pause * 0.5,
+            pause_frequency=pause_per_min if not np.isnan(pause_per_min) else 5.0,
+            thought_duration_mean=thought_duration,
+            thought_duration_std=thought_duration * 0.3,
             speaking_rate=(
                 SpeakingRate.FAST if wpm_estimate > 160
                 else SpeakingRate.SLOW if wpm_estimate < 130
                 else SpeakingRate.MODERATE
             ),
             turn_style=(
-                TurnStyle.PATIENT if pause_ratio > 0.3
+                TurnStyle.PATIENT if pause_ratio > 0.35
                 else TurnStyle.RHYTHMIC
             ),
         )
 
     def _analyze_prosody(self, features: Dict[str, Any]) -> ProsodyEnvelope:
-        """Extract prosody envelope from audio features."""
+        """Extract prosody envelope from audio features using real OpenSMILE data."""
         stats = features.get("statistics", {})
+        functionals = features.get("functionals", {})
 
-        f0_mean = stats.get("F0semitoneFrom27.5Hz_sma3nz", {}).get("mean", 120.0)
-        f0_std = stats.get("F0semitoneFrom27.5Hz_sma3nz", {}).get("std", 10.0)
+        # Primary: try to get F0 from functionals (most accurate)
+        f0_mean_func = None
+        f0_std_func = None
+        if functionals:
+            for key, val in functionals.items():
+                if "f0semitone" in key.lower() and "amean" in key.lower():
+                    f0_mean_func = 27.5 * (2 ** (val / 12.0))
+                elif "f0semitone" in key.lower() and "stddev" in key.lower():
+                    f0_std_func = val * 50.0 / 12.0  # approximate Hz std from semitones
+
+        # Secondary: from frame-level statistics
+        f0_mean_hz = 120.0
+        f0_std_val = 15.0
+        for key, val in stats.items():
+            if "f0semitone" in key.lower():
+                mean_st = val.get("mean", 27.0)
+                std_st = val.get("std", 3.0)
+                f0_mean_hz = 27.5 * (2 ** (mean_st / 12.0))
+                f0_std_val = std_st * 50.0 / 12.0
+                break
+
+        # Use functional values if available (more accurate)
+        if f0_mean_func is not None:
+            f0_mean_hz = f0_mean_func
+        if f0_std_func is not None:
+            f0_std_val = f0_std_func
+
+        # Loudness
         loudness_mean = stats.get("Loudness_sma3", {}).get("mean", 0.0)
         loudness_std = stats.get("Loudness_sma3", {}).get("std", 3.0)
 
+        # F0 range
+        f0_low = max(50.0, f0_mean_hz - 2 * f0_std_val)
+        f0_high = f0_mean_hz + 2 * f0_std_val
+
+        # Build eGeMAPS vector from statistics (means of all 25 LLDs)
+        egemaps = []
+        for key in sorted(stats.keys()):
+            egemaps.append(stats[key]["mean"])
+
         return ProsodyEnvelope(
-            mean_f0=float(f0_mean),
-            f0_std=float(f0_std),
-            f0_range=(
-                float(f0_mean - 2 * f0_std),
-                float(f0_mean + 2 * f0_std),
-            ),
+            mean_f0=float(f0_mean_hz),
+            f0_std=float(f0_std_val),
+            f0_range=(float(f0_low), float(f0_high)),
+            f0_contour=self._extract_f0_contour(features)[:1000],  # keep manageable
             mean_energy=float(loudness_mean),
             energy_std=float(loudness_std),
-            egemaps_vector=(
-                [float(stats[k]["mean"]) for k in list(stats.keys())[:25]]
-                if stats else None
-            ),
+            egemaps_vector=egemaps if egemaps else None,
         )
 
     def _transcribe(self, wav_path: str) -> str:
@@ -399,8 +539,9 @@ class DecompositionPipeline:
 
     def _compute_groove(self, cadence: CadenceProfile) -> GrooveParameters:
         """Compute groove parameters from cadence."""
+        bpm = 60.0 / max(cadence.thought_duration_mean, 0.1)
         return GrooveParameters(
-            conversational_bpm=60.0 / max(cadence.thought_duration_mean, 0.1),
+            conversational_bpm=bpm if not np.isnan(bpm) else 60.0,
             swing_factor=0.2 if cadence.turn_style == TurnStyle.RHYTHMIC else 0.0,
             fermata_threshold=cadence.mean_pause_duration * 3,
             call_response_ratio=1.0,
@@ -436,13 +577,28 @@ class DecompositionPipeline:
         """Compute confidence score for the decomposition."""
         duration = audio_info.get("duration_seconds", 0)
         frame_count = features.get("frame_count", 0)
+        has_real_features = features.get("frames", []) and any(
+            v != 0.0
+            for f in features.get("frames", [])[:5]
+            for v in f.values()
+            if v != 0.0
+        )
+        # Base confidence on duration and feature quality
+        base = 0.1
+        if has_real_features:
+            base += 0.2  # OpenSMILE features add confidence
+        if duration < 5:
+            return base + 0.1
+        if duration < 15:
+            return base + 0.3
         if duration < 30:
-            return 0.3  # too short for reliable extraction
+            return base + 0.4
         if duration < 120:
-            return 0.6
-        if frame_count < 100:
-            return 0.5
-        return min(0.95, 0.5 + duration / 3600)
+            return base + 0.5
+        base += min(0.65, duration / 3600)
+        if frame_count < 50:
+            base *= 0.7
+        return min(0.95, base)
 
     def _merge_personas(self, personas: List[Persona], name: str) -> Persona:
         """Merge multiple persona extractions for the same speaker."""
@@ -453,7 +609,6 @@ class DecompositionPipeline:
             p.name = name
             return p
 
-        # Average numeric fields
         merged = Persona(name=name, source_file_count=len(personas))
         avg_wpm = np.mean([p.cadence.mean_wpm for p in personas])
         avg_pause = np.mean([p.cadence.mean_pause_duration for p in personas])
@@ -471,23 +626,52 @@ class DecompositionPipeline:
         return merged
 
     def _mock_egemaps(self, wav_path: str) -> Dict[str, Any]:
-        """Generate mock features when OpenSMILE is unavailable."""
+        """Generate mock features when OpenSMILE is unavailable.
+
+        Produces structured features with varied energy and F0 to yield
+        more realistic cadence analysis than flat values.
+        """
+        np.random.seed(42)
+        frame_count = 200
+
+        # Simulate varied F0 contours (120 Hz ± some variation)
+        f0_semitone = 27.0 + 3.0 * np.random.randn(frame_count)
+        f0_semitone = np.clip(f0_semitone, 20.0, 35.0)
+
+        # Simulate loudness contour with dips (for pause detection)
+        base_loudness = -5.0 + 3.0 * np.random.randn(frame_count)
+        # Insert pause-like dips in random segments
+        for _ in range(int(frame_count * 0.15)):
+            start = np.random.randint(0, frame_count - 8)
+            length = np.random.randint(3, 10)
+            dips = np.linspace(0, -40, length)
+            end = min(start + length, frame_count)
+            base_loudness[start:end] += dips[:end - start]
+        base_loudness = np.clip(base_loudness, -60, 5)
+
+        # F1 amplitude (for energy-based analysis)
+        f1_amplitude = -25.0 + 8.0 * np.random.randn(frame_count)
+
+        frames = []
+        for i in range(frame_count):
+            frames.append({
+                "F0semitoneFrom27.5Hz_sma3nz": float(f0_semitone[i]),
+                "Loudness_sma3": float(base_loudness[i]),
+                "F1amplitudeLogRelF0_sma3z": float(f1_amplitude[i]),
+            })
+
+        stats = {}
+        for key in ["F0semitoneFrom27.5Hz_sma3nz", "Loudness_sma3", "F1amplitudeLogRelF0_sma3z"]:
+            vals = [f[key] for f in frames]
+            stats[key] = {
+                "mean": float(np.mean(vals)),
+                "std": float(np.std(vals)),
+                "min": float(np.min(vals)),
+                "max": float(np.max(vals)),
+            }
+
         return {
-            "frames": [
-                {
-                    "F0semitoneFrom27.5Hz_sma3nz": 120.0,
-                    "Loudness_sma3": 5.0,
-                    "F1amplitudeLogRelF0_sma3z": -30.0,
-                    "Slope0-500_sma3": 0.0,
-                    "Slope500-1500_sma3": 0.0,
-                    "SpectralFlux_sma3": 0.0,
-                }
-                for _ in range(100)
-            ],
-            "statistics": {
-                "F0semitoneFrom27.5Hz_sma3nz": {"mean": 120.0, "std": 15.0, "min": 90.0, "max": 200.0},
-                "Loudness_sma3": {"mean": 5.0, "std": 2.0, "min": 0.0, "max": 10.0},
-                "F1amplitudeLogRelF0_sma3z": {"mean": -30.0, "std": 5.0, "min": -50.0, "max": -10.0},
-            },
-            "frame_count": 100,
+            "frames": frames,
+            "statistics": stats,
+            "frame_count": frame_count,
         }

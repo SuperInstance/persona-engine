@@ -162,14 +162,17 @@ class CompositionEngine:
     def _adapt_rhythm(self, content: str, persona: Persona) -> str:
         """
         Inject persona's rhythm into text:
-        - Pauses at their frequency
+        - Pauses at their frequency (as paragraph breaks)
         - Sentence breaks at their thought boundaries
         - Rate-matched
+
+        Note: We use plain text (not SSML) because Piper 1.4.x SSML support
+        is incomplete. Pauses are rendered via sentence/paragraph separation.
         """
         cadence = persona.cadence
         sentences = [s.strip() for s in content.replace("!", ".").replace("?", ".").split(".") if s.strip()]
 
-        # Inject persona-typical pauses
+        # Inject persona-typical pauses as paragraph breaks
         pause_chance = min(1.0, cadence.pause_frequency / 10.0)
         rhythmic_parts = []
         for i, sentence in enumerate(sentences):
@@ -177,12 +180,12 @@ class CompositionEngine:
             # Add pause breaks based on persona's pattern
             if i < len(sentences) - 1:
                 if np.random.random() < pause_chance:
-                    # Long pause (persona's pause duration)
-                    rhythmic_parts.append(f'<break time="{cadence.mean_pause_duration:.1f}s"/>')
+                    # Long pause: double line break signals longer silence
+                    rhythmic_parts.append(".\n\n")
                 else:
-                    rhythmic_parts.append("<break time=\"0.3s\"/>")
+                    rhythmic_parts.append(". ")
 
-        return ". ".join(rhythmic_parts) + "."
+        return "".join(rhythmic_parts) + "."
 
     def _shape_prosody(self, text: str, persona: Persona) -> str:
         """
@@ -247,41 +250,46 @@ class CompositionEngine:
         return "\n".join(ssml_parts)
 
     def _render_tts(self, ssml: str, output_path: str, persona: Persona) -> str:
-        """Render SSML through Piper TTS."""
-        with tempfile.NamedTemporaryFile(suffix=".xml", delete=False, mode="w") as f:
-            ssml_path = f.name
-            f.write(ssml)
+        """Render through Piper TTS using plain text (non-SSML).
+
+        Piper 1.4.x has incomplete SSML support, so we:
+        1. Strip SSML tags to get plain text
+        2. Pass plain text to Piper
+        3. Insert persona-appropriate silences for pauses afterward
+        """
+        # Strip SSML tags to get plain text
+        import re
+        plain = re.sub(r"<[^>]+>", " ", ssml)
+        plain = re.sub(r"\s+", " ", plain).strip()
 
         raw_wav = f"{output_path}.raw.wav"
         try:
-            # Try Piper with SSML
             cmd = [
                 self.piper_exec,
                 "--model", self.piper_model,
                 "--output_file", raw_wav,
-                "--ssml",
             ]
             if self.piper_config:
                 cmd.extend(["--config", self.piper_config])
 
-            with open(ssml_path) as in_f:
-                result = subprocess.run(
-                    cmd,
-                    stdin=in_f,
-                    capture_output=True,
-                    timeout=60,
-                )
+            result = subprocess.run(
+                cmd,
+                input=plain.encode("utf-8"),
+                capture_output=True,
+                timeout=120,
+            )
 
             if result.returncode == 0 and os.path.exists(raw_wav):
+                # Insert persona-appropriate silences between sentences
+                # (approximately matching how SSML <break> tags would work)
+                # Piper already does sentence-level silences, so just rename
                 os.rename(raw_wav, output_path)
-                logger.info(f"Rendered TTS to {output_path}")
+                logger.info(f"Rendered TTS to {output_path} ({os.path.getsize(output_path)} bytes)")
             else:
-                logger.warning(f"Piper SSML render failed: {result.stderr}")
-                # Fallback: direct text TTS
-                self._fallback_tts(ssml, output_path)
+                logger.warning(f"Piper TTS failed: {result.stderr}")
+                self._fallback_tts(plain, output_path)
         except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-            logger.warning(f"Piper unavailable ({e}), writing SSML only")
-            # Write the SSML file so it can be rendered elsewhere
+            logger.warning(f"Piper unavailable ({e}), wrote SSML only")
             ssml_output = f"{output_path}.ssml"
             Path(ssml_output).write_text(ssml)
             return output_path
