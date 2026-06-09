@@ -221,22 +221,25 @@ class CompositionEngine:
             output_max=SSML_VOLUME_MAX,
         )
 
-        # Build SSML
+        # Build SSML — CRITICAL: <break> MUST be outside <emphasis>!
+        # Some TTS engines (Piper, Amazon Polly) reject <break> inside <emphasis>
         ssml_parts = [
             '<?xml version="1.0"?>',
             "<speak>",
             f'  <prosody rate="{rate:.1f}" pitch="{pitch:.1f}st" volume="{volume:.1f}dB">',
         ]
 
-        # Add groove feel via phrasing
-        if groove and groove.swing_factor > 0.1:
-            # Swing adds emphasis on alternating phrases
-            sentences = [s.strip() for s in text.replace("!", ".").replace("?", ".").split(".") if s.strip()]
-            for i, sent in enumerate(sentences):
+        sentences = [s.strip() for s in text.replace("!", ".").replace("?", ".").split(".") if s.strip()]
+        pause_dur = persona.cadence.mean_pause_duration or 0.3
+        for i, sent in enumerate(sentences):
+            if groove and groove.swing_factor > 0.1:
                 emph = "strong" if (i % 2 == 0 and groove.swing_factor > 0.2) else "moderate"
                 ssml_parts.append(f'    <emphasis level="{emph}">{sent}.</emphasis>')
-        else:
-            ssml_parts.append(f"    {text}")
+            else:
+                ssml_parts.append(f"    {sent}.")
+            # Break goes AFTER emphasis — NEVER nest <break> inside <emphasis>
+            if i < len(sentences) - 1:
+                ssml_parts.append(f'    <break time="{pause_dur:.1f}s"/>')
 
         ssml_parts.append("  </prosody>")
         ssml_parts.append("</speak>")

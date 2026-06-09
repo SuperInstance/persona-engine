@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.egg-info/
+.env
+*.wav
+*.raw.wav
+*.ssml
+*.xml
