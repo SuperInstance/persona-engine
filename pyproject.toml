@@ -1,0 +1,29 @@
+[project]
+name = "persona-engine"
+version = "0.1.0"
+description = "Decompose, compose, and vibe-code personalities as vector databases with rhythmic TTS rendering"
+authors = [
+    {name = "SuperInstance Fleet", email = "superinstance@users.noreply.github.com"}
+]
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.9.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+tts = [
+    "piper-tts>=1.0.0",
+]
+decompose = [
+    "opensmile>=2.0.0",
+    "whisper",
+]
+
+[project.urls]
+"Source" = "https://github.com/SuperInstance/persona-engine"
+"Fleet" = "https://github.com/SuperInstance/construct-coordination"
+
+[tool.setuptools.packages.find]
+include = ["persona_engine*"]
