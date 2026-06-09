@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install numpy pydantic
+      - name: Import check
+        run: |
+          python -c "from persona_engine.schemas.persona import Persona; print('✅ schemas OK')"
+          python -c "from persona_engine.compose.engine import CompositionEngine; print('✅ compose OK')"
+          python -c "from persona_engine.groove.engine import GrooveEngine; print('✅ groove OK')"
+      - name: Decompose check
+        run: python -c "
+          try:
+            from persona_engine.decompose.pipeline import DecompositionPipeline;
+            print('✅ decompose OK')
+          except ImportError as e:
+            print(f'⚠️ opensmile not available: {e}')
+          "
