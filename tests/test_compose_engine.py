@@ -4,6 +4,8 @@ _adapt_rhythm and _shape_prosody don't touch audio/TTS, so they're
 testable without piper/opensmile. Full compose()/compose_interactive()
 require a real piper binary and are out of scope here.
 """
+import xml.etree.ElementTree as ET
+
 import numpy as np
 import pytest
 
@@ -63,3 +65,24 @@ def test_adapt_rhythm_normalizes_question_and_exclamation_marks(engine):
     assert "Is this real" in result
     assert "Yes it is" in result
     assert "Truly" in result
+
+
+def test_shape_prosody_generates_parseable_ssml(engine):
+    """_shape_prosody must return well-formed XML that ElementTree can parse."""
+    persona = _persona_with_pause_frequency(0.0)
+    ssml = engine._shape_prosody("Hello world.", persona)
+    root = ET.fromstring(ssml)
+    assert root.tag == "speak"
+
+
+def test_shape_prosody_escapes_xml_special_characters(engine):
+    """Content with &, <, >, quotes must not produce malformed SSML."""
+    persona = _persona_with_pause_frequency(0.0)
+    ssml = engine._shape_prosody('A & B. C < D. "Quoted".', persona)
+
+    # Should parse as well-formed XML.
+    root = ET.fromstring(ssml)
+    text = "".join(root.itertext())
+    assert "A & B" in text
+    assert "C < D" in text
+    assert '"Quoted".' in text
