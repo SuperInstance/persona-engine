@@ -5,7 +5,7 @@
 **A voice is not just *what* someone says. It's *how* they say it.**
 
 [![I2I Protocol](https://img.shields.io/badge/protocol-I2I%20v2.1-blue)](#i2i-integration)
-[![Pipeline](https://img.shields.io/badge/pipeline-Fleet--MIDI-ff69b4)](https://github.com/SuperInstance/fleet-midi)
+[![Pipeline](https://img.shields.io/badge/pipeline-Fleet--MIDI--Pulse-ff69b4)](https://github.com/SuperInstance/fleet-midi-pulse)
 [![Status](https://img.shields.io/badge/status-alpha-yellow)]()
 
 </div>
@@ -208,10 +208,12 @@ The end state is a system where:
 
 **Fleet repos:**
 
-- [fleet-midi](https://github.com/SuperInstance/fleet-midi) — musical timing primitives (MidiMessage enum, event-bus Context frame, binary codec). The groove engine maps BPM/swing/fermata concepts from this layer onto conversational rhythm.
+- [fleet-midi-pulse](https://github.com/SuperInstance/fleet-midi-pulse) — BPM/swing/fermata timing primitives (`Pulse`, `TempoMap`, `SwingQuantizer`). The groove engine maps these timing concepts onto conversational rhythm.
+- [fleet-i2i-protocol](https://github.com/SuperInstance/fleet-i2i-protocol) — the I2I wire format (bottles, speech acts, envelope routing) this engine's `PERSONA_DECOMPOSE` / `PERSONA_COMPOSE` / `PERSONA_QUERY` messages are built on.
+- [baton-system](https://github.com/SuperInstance/baton-system) — I2I coordination hub (tripartite baton protocol, fleet state) that routes bottles between agents at a higher level than the wire format itself.
 - [fleet-conductor](https://github.com/SuperInstance/fleet-conductor) — fleet orchestration core (AgentState FSM, reconcile loop). Personas are discoverable fleet agents that publish `PersonaManifest` for coordination.
-- [baton-system](https://github.com/SuperInstance/baton-system) — I2I protocol and agent coordination. Defines the bottle wire format used for `PERSONA_DECOMPOSE` / `PERSONA_COMPOSE` / `PERSONA_QUERY` messages.
 - [superinstance-architecture](https://github.com/SuperInstance/superinstance-architecture) — fleet-wide architecture spec covering persona concepts and inter-agent design.
+- [A2A-native-notebookLM](https://github.com/SuperInstance/A2A-native-notebookLM) — the fleet's cognitive research/synthesis command center; a fork of open-notebook extended with I2I/A2A hooks.
 
 **External tools:**
 
