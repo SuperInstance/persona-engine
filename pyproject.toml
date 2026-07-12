@@ -3,6 +3,7 @@ requires = ["setuptools>=64.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
+license = "MIT"
 name = "persona-engine"
 version = "0.1.0"
 description = "Decompose, compose, and vibe-code personalities as vector databases with rhythmic TTS rendering"
