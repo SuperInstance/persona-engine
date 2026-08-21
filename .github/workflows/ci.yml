@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, production-round3-2026-07-10 ]
   pull_request:
     branches: [ main ]
 
@@ -15,13 +15,15 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install dependencies
-        run: pip install numpy pydantic
+        run: pip install numpy pydantic pytest
       - name: Import check
         run: |
           python -c "from persona_engine.schemas.persona import Persona; print('✅ schemas OK')"
           python -c "from persona_engine.compose.engine import CompositionEngine; print('✅ compose OK')"
           python -c "from persona_engine.groove.engine import GrooveEngine; print('✅ groove OK')"
-      - name: Decompose check
+      - name: Unit tests (schemas, compose text logic, groove math)
+        run: pytest tests/ -v
+      - name: Decompose check (optional heavy dependency, not core correctness)
         run: python -c "
           try:
             from persona_engine.decompose.pipeline import DecompositionPipeline;
