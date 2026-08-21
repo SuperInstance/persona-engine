@@ -22,6 +22,23 @@ The Persona Engine decomposes human speech into **personality vectors** — cade
 
 ---
 
+## Status
+
+Not every layer is at the same maturity. Here's what's verified vs. what depends on external tooling:
+
+| Layer | State | Detail |
+|-------|-------|--------|
+| ✅ Persona schemas | Tested (21/21) | Pydantic models for cadence, prosody, lexical, groove, and character parameters. Schema-drift checks validate all committed `characters/*.json` fixtures. |
+| ✅ Groove engine | Tested | BPM/swing/fermata math, timeline rendering, and persona-to-groove mapping. Pure-Python, no external deps. |
+| ✅ Compose engine (text) | Tested | SSML generation and rhythm adaptation logic. Verified without audio hardware. |
+| ⚠️ Decompose pipeline | Real code, needs external tools | Requires `opensmile`, `ffmpeg`, and `whisper` CLI binaries. Falls back to mock features when unavailable — useful for development, not production extraction. |
+| ⚠️ TTS rendering | Real code, needs `piper` | The compose engine calls `piper` for voice rendering. Without it, writes SSML files only. |
+| 🔮 End-to-end "Scientific Telephone" | Design goal | Full decompose → compose → interactive Q&A loop described below is the target, not the current shipped state. |
+
+Run tests: `python -m pytest tests/ -v` (requires `numpy`, `pydantic`, `pytest`).
+
+---
+
 ## Architecture
 
 ```
@@ -175,6 +192,8 @@ Personas are discoverable fleet agents. Any agent can send bottles:
 
 ## The Scientific Telephone
 
+> 🔮 This is the **design goal**, not the current shipped state. Each component below has real code, but the full end-to-end loop requires external tools (OpenSMILE, Piper, Whisper) and has not been validated as an integrated pipeline.
+
 The end state is a system where:
 
 1. You feed it podcast interviews with a scientist
@@ -187,11 +206,19 @@ The end state is a system where:
 
 ## Related
 
-- [fleet-midi-pulse](https://github.com/SuperInstance/fleet-midi-pulse) — BPM/swing/fermata timing layer (groove backbone)
-- [fleet-i2i-protocol](https://github.com/SuperInstance/fleet-i2i-protocol) — I2I wire format (bottle transport)
-- [A2A-native-notebookLM](https://github.com/SuperInstance/A2A-native-notebookLM) — Fleet cognitive command center (surround research/synthesis)
-- [OpenSMILE](https://audeering.com/technology/opensmile/) — Feature extraction (eGeMAPS)
-- [Piper TTS](https://github.com/rhasspy/piper) — Voice rendering (SSML prosody)
+**Fleet repos:**
+
+- [fleet-midi-pulse](https://github.com/SuperInstance/fleet-midi-pulse) — BPM/swing/fermata timing primitives (`Pulse`, `TempoMap`, `SwingQuantizer`). The groove engine maps these timing concepts onto conversational rhythm.
+- [fleet-i2i-protocol](https://github.com/SuperInstance/fleet-i2i-protocol) — the I2I wire format (bottles, speech acts, envelope routing) this engine's `PERSONA_DECOMPOSE` / `PERSONA_COMPOSE` / `PERSONA_QUERY` messages are built on.
+- [baton-system](https://github.com/SuperInstance/baton-system) — I2I coordination hub (tripartite baton protocol, fleet state) that routes bottles between agents at a higher level than the wire format itself.
+- [fleet-conductor](https://github.com/SuperInstance/fleet-conductor) — fleet orchestration core (AgentState FSM, reconcile loop). Personas are discoverable fleet agents that publish `PersonaManifest` for coordination.
+- [superinstance-architecture](https://github.com/SuperInstance/superinstance-architecture) — fleet-wide architecture spec covering persona concepts and inter-agent design.
+- [A2A-native-notebookLM](https://github.com/SuperInstance/A2A-native-notebookLM) — the fleet's cognitive research/synthesis command center; a fork of open-notebook extended with I2I/A2A hooks.
+
+**External tools:**
+
+- [OpenSMILE](https://audeering.com/technology/opensmile/) — feature extraction (eGeMAPS), used in the decompose pipeline
+- [Piper TTS](https://github.com/rhasspy/piper) — neural TTS, used for voice rendering in the compose engine
 
 ---
 
