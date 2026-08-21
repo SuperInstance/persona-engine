@@ -41,6 +41,7 @@ Architecture:
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import os
@@ -235,11 +236,12 @@ class CompositionEngine:
         sentences = [s.strip() for s in text.replace("!", ".").replace("?", ".").split(".") if s.strip()]
         pause_dur = persona.cadence.mean_pause_duration or 0.3
         for i, sent in enumerate(sentences):
+            safe_sent = html.escape(sent, quote=True)
             if groove and groove.swing_factor > 0.1:
                 emph = "strong" if (i % 2 == 0 and groove.swing_factor > 0.2) else "moderate"
-                ssml_parts.append(f'    <emphasis level="{emph}">{sent}.</emphasis>')
+                ssml_parts.append(f'    <emphasis level="{emph}">{safe_sent}.</emphasis>')
             else:
-                ssml_parts.append(f"    {sent}.")
+                ssml_parts.append(f"    {safe_sent}.")
             # Break goes AFTER emphasis — NEVER nest <break> inside <emphasis>
             if i < len(sentences) - 1:
                 ssml_parts.append(f'    <break time="{pause_dur:.1f}s"/>')
